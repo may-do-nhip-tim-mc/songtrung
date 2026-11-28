@@ -12,6 +12,16 @@
       .replace(/'/g, '&#39;');
   }
 
+  function hashStr(str) {
+    var h = 2166136261;
+    var s = String(str || '');
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h;
+  }
+
   var THEMES = {
     sim_zone: {
       bg: '#f5f4ef', card: '#ffffff', border: '#dcd6c8', text: '#26292b',
@@ -114,108 +124,368 @@
     return { color: T.accent, glyph: p.icon || '📍', txtColor: T.text };
   }
 
-  function buildStreetMapSvg(curMode, theme) {
-    var lbls = curMode === 'geflich'
-      ? { a: 'Đ. Hạ Lưu', b: 'Đại lộ Sinh Thái', c: 'Khu Ven Sông', z: 'QUẬN TRUNG TÂM' }
-      : curMode === 'north'
-      ? { a: 'Đại lộ Duyên Hải', b: 'Đ. Cảng Bắc', c: 'Tuyến Liên Bang', z: 'KHU CẢNG BẮC' }
-      : curMode === 'aurora'
-      ? { a: 'Đại lộ Cực Quang', b: 'Vành đai Vòm Kính', c: 'Trục Tháp Lõi', z: 'PHÂN KHU B' }
-      : curMode === 'sim_zone'
-      ? { a: 'Đ. Trung Tâm', b: 'Phố Nam Đồi', c: 'Đ. Công Viên', z: 'KHU DÂN CƯ' }
-      : { a: 'Quốc lộ Đệm', b: 'Tuyến Biên Giới', c: 'Đường Vành Đai', z: 'VÙNG ĐỆM' };
+  function detectGpsLost(curMode, M) {
+    if (!M) return curMode === 'switching';
+    if (M.gpsLost === true || M.noSignal === true) return true;
+    if (M.scope === 'offlimit' || M.scope === 'dead_zone' || M.scope === 'no_signal') return true;
+    if (M.offLimit && (M.offLimit.pos === 'full' || M.offLimit.pos === 'center')) return true;
+    if (curMode === 'switching') return true;
+
+    var locTxt = ((M.currentSpot || '') + ' ' + (M.area || '')).toLowerCase();
+    var noteTxt = (M.note || '').toLowerCase();
+
+    var inRestrictedSpot = /khu vực cách ly|khu cách ly|vành đai cấm|khu vực cấm|rừng cấm|rừng bảo tồn|hầm bảo trì|đường hầm bí mật|đường chân trời|black-vault|căn cứ đặc nhiệm|vùng nhiễu|ngoài vùng phủ sóng|ngoài bản đồ|không xác định/.test(locTxt);
+    var explicitNoteLoss = /mất tín hiệu|mất định vị|mất sóng gps|không thể định vị|không xác định được vị trí|ngoài vùng phủ sóng|nhiễu gps hoàn toàn|định vị thất bại/.test(noteTxt);
+
+    return inRestrictedSpot || explicitNoteLoss;
+  }
+
+  function pickMapLayout(curMode, M) {
+    var spot = ((M && M.currentSpot) || '') + ' ' + ((M && M.area) || '');
+    var low = spot.toLowerCase();
+
+    if (curMode === 'aurora') return 'aurora_dome';
+    if (curMode === 'sim_zone' || (M && M.scope === 'small_town')) return 'small_town';
+    if (curMode === 'buffer' || (M && M.scope === 'buffer')) return 'border_wild';
+
+    if (/cảng|bến tàu|nhà ga|ga tàu|ga bus|bus điện ngầm|vượt đại dương|đường ray|duyên hải/.test(low)) {
+      return 'port_transit';
+    }
+    if (/rừng|nông trại|xóm ven|cao nguyên|ngoại ô|vùng ven|vành đai|bìa rừng|núi/.test(low)) {
+      return 'border_wild';
+    }
+    if (/hạ lưu|ven sông|bờ sông|chợ sông|bến sông|cầu sông/.test(low)) {
+      return 'geflich_river';
+    }
+    if (curMode === 'geflich' && !/y viện|bệnh viện|học viện|đại học|quảng trường|phố trung tâm/.test(low)) {
+      return 'geflich_river';
+    }
+    return 'urban_grid';
+  }
+
+  function buildLostSignalSvg(theme) {
+    var grid = '<g stroke="' + theme.border + '" stroke-width="0.7" opacity="0.45">' +
+      '<path d="M0,40 H400 M0,80 H400 M0,120 H400 M0,160 H400 M0,200 H400"/>' +
+      '<path d="M50,0 V240 M100,0 V240 M150,0 V240 M200,0 V240 M250,0 V240 M300,0 V240 M350,0 V240"/>' +
+    '</g>';
+    var contours = '<g fill="none" stroke="' + theme.offStroke + '" stroke-width="1" stroke-dasharray="4 5" opacity="0.35">' +
+      '<path d="M-10,62 Q95,28 195,56 T410,44"/>' +
+      '<path d="M-10,184 Q120,214 235,176 T410,192"/>' +
+      '<circle cx="200" cy="120" r="46"/>' +
+      '<circle cx="200" cy="120" r="82" opacity="0.5"/>' +
+    '</g>';
+    var deadRoads = '<g fill="none" stroke="' + theme.roadMinor + '" stroke-width="2" stroke-dasharray="3 6" opacity="0.32">' +
+      '<path d="M-10,136 L78,124"/>' +
+      '<path d="M332,96 L410,88"/>' +
+    '</g>';
+    return '<svg class="dp-map-svg" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid slice" aria-hidden="true">' +
+      '<defs><pattern id="dpHatchLost" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+        '<line x1="0" y1="0" x2="0" y2="12" stroke="' + theme.offStroke + '" stroke-width="2" opacity="0.16"/>' +
+      '</pattern></defs>' +
+      '<rect width="400" height="240" fill="' + theme.mapBg + '"/>' +
+      '<rect width="400" height="240" fill="url(#dpHatchLost)"/>' +
+      grid + contours + deadRoads +
+    '</svg>';
+  }
+
+  function buildStreetMapSvg(curMode, theme, M) {
+    var layout = pickMapLayout(curMode, M);
+    var seed = hashStr(((M && M.currentSpot) || '') + '|' + ((M && M.area) || '') + '|' + curMode);
+    var v = seed % 2;
 
     var waterLayer = '';
     var parkLayer = '';
-    if (curMode === 'geflich') {
-      waterLayer = '<path d="M-20,210 C85,180 155,222 260,192 C325,174 375,188 420,168 L420,250 L-20,250 Z" fill="' + theme.water + '" opacity="0.9"/>';
-      parkLayer = '<path d="M125,22 L215,38 L228,96 L158,118 L112,78 Z" fill="' + theme.park + '" opacity="0.9"/>' +
-        '<ellipse cx="322" cy="148" rx="34" ry="20" fill="' + theme.park + '" opacity="0.85"/>' +
-        '<ellipse cx="48" cy="142" rx="28" ry="18" fill="' + theme.park + '" opacity="0.8"/>';
-    } else if (curMode === 'north') {
-      waterLayer = '<path d="M322,-10 C310,65 342,130 315,250 L420,250 L420,-10 Z" fill="' + theme.water + '" opacity="0.92"/>';
-      parkLayer = '<rect x="132" y="34" width="66" height="44" rx="10" fill="' + theme.park + '" opacity="0.85"/>' +
-        '<circle cx="62" cy="172" r="22" fill="' + theme.park + '" opacity="0.8"/>';
-    } else if (curMode === 'aurora') {
-      waterLayer = '<path d="M332,-10 C324,75 336,155 326,250 L420,250 L420,-10 Z" fill="' + theme.water + '" opacity="0.9"/>';
-      parkLayer = '<circle cx="176" cy="68" r="36" fill="' + theme.park + '" stroke="' + theme.border + '" stroke-width="1.2" opacity="0.95"/>' +
-        '<circle cx="176" cy="68" r="14" fill="' + theme.water + '" opacity="0.65"/>' +
-        '<circle cx="290" cy="176" r="22" fill="' + theme.park + '" stroke="' + theme.border + '" stroke-width="1" opacity="0.9"/>';
+    var blocks = '';
+    var minorRoads = '';
+    var majorPaths = '';
+    var extraOverlay = '';
+    var transitDots = '';
+    var labels = '';
+
+    var lblStyle = 'font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif" font-weight="700" paint-order="stroke" stroke="' + theme.labelHalo + '" stroke-width="3" stroke-linejoin="round"';
+
+    if (layout === 'geflich_river') {
+      var rA = v === 0 ? 'Đ. Ven Sông Hạ Lưu' : 'Đại lộ Sinh Thái';
+      var rB = v === 0 ? 'Phố Chợ Sông' : 'Đ. Vườn Cam';
+      var rZ = (M && M.area) ? M.area.toUpperCase().slice(0, 18) : 'HẠ LƯU KHÂU';
+
+      waterLayer = v === 0
+        ? '<path d="M-10,186 C85,164 175,204 282,178 C338,164 378,174 415,162 L415,250 L-10,250 Z" fill="' + theme.water + '" opacity="0.92"/>'
+        : '<path d="M-10,168 C95,186 190,158 295,186 C350,200 385,190 415,182 L415,250 L-10,250 Z" fill="' + theme.water + '" opacity="0.92"/>';
+
+      parkLayer =
+        '<path d="M24,18 L108,22 L114,78 L34,84 Z" fill="' + theme.park + '" opacity="0.88"/>' +
+        '<ellipse cx="326" cy="56" rx="44" ry="24" fill="' + theme.park + '" opacity="0.84"/>' +
+        '<ellipse cx="64" cy="160" rx="34" ry="12" fill="' + theme.park + '" opacity="0.72"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.78">' +
+        '<rect x="132" y="20" width="52" height="24" rx="2"/>' +
+        '<rect x="196" y="22" width="48" height="26" rx="2"/>' +
+        '<rect x="134" y="64" width="44" height="34" rx="2"/>' +
+        '<rect x="192" y="68" width="56" height="30" rx="2"/>' +
+        '<rect x="268" y="84" width="46" height="24" rx="2"/>' +
+        '<rect x="328" y="90" width="48" height="22" rx="2"/>' +
+        '<rect x="30" y="102" width="46" height="22" rx="2"/>' +
+        '<rect x="132" y="138" width="48" height="22" rx="2"/>' +
+        '<rect x="224" y="134" width="52" height="24" rx="2"/>' +
+        '<rect x="296" y="128" width="48" height="22" rx="2"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2.2" fill="none" opacity="0.88" stroke-linecap="round">' +
+        '<path d="M-10,56 L278,56"/>' +
+        '<path d="M188,10 L188,120"/>' +
+        '<path d="M256,10 L256,114"/>' +
+        '<path d="M158,124 L158,176"/>' +
+        '<path d="M318,98 L322,166"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,138 C85,130 148,124 200,120 C268,114 335,108 415,100"/>' +
+        '<path d="M118,-10 L118,178"/>' +
+        '<path d="M286,-10 L286,112"/>';
+
+      transitDots = '<g fill="' + theme.transitDot + '" stroke="' + theme.roadInner + '" stroke-width="1">' +
+        '<rect x="115" y="123" width="6" height="6" rx="1.5"/>' +
+        '<rect x="283" y="109" width="6" height="6" rx="1.5"/>' +
+      '</g>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="230" y="114" font-size="8.4" fill="' + theme.mapLabel + '" transform="rotate(-5 230 114)">' + esc(rA) + '</text>' +
+        '<text x="124" y="48" font-size="8" fill="' + theme.mapLabel + '">' + esc(rB) + '</text>' +
+        '<text x="26" y="218" font-size="7.8" letter-spacing="0.9" fill="' + theme.mapLabel + '" opacity="0.78">SÔNG HẠ LƯU</text>' +
+        '<text x="280" y="148" font-size="7.3" letter-spacing="0.8" fill="' + theme.mapLabel + '" opacity="0.7">' + esc(rZ) + '</text>' +
+      '</g>';
+
+    } else if (layout === 'port_transit') {
+      var pA = curMode === 'geflich' ? 'Tuyến Trạm Sông' : 'Đại lộ Duyên Hải';
+      var pB = curMode === 'geflich' ? 'Đ. Bến Thủy' : 'Đ. Cảng Bắc';
+      var pRail = 'Tuyến Bus Điện Ngầm Vượt Đại Dương';
+
+      waterLayer = '<path d="M326,-10 C320,65 330,155 318,250 L415,250 L415,-10 Z" fill="' + theme.water + '" opacity="0.92"/>' +
+        '<rect x="308" y="44" width="38" height="12" rx="1.5" fill="' + theme.block + '"/>' +
+        '<rect x="306" y="158" width="44" height="14" rx="1.5" fill="' + theme.block + '"/>';
+
+      parkLayer = '<rect x="18" y="142" width="58" height="44" rx="6" fill="' + theme.park + '" opacity="0.82"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.8">' +
+        '<rect x="18" y="16" width="58" height="32" rx="2"/>' +
+        '<rect x="98" y="16" width="64" height="32" rx="2"/>' +
+        '<rect x="184" y="16" width="66" height="32" rx="2"/>' +
+        '<rect x="18" y="84" width="58" height="24" rx="2"/>' +
+        '<rect x="98" y="84" width="64" height="24" rx="2"/>' +
+        '<rect x="184" y="84" width="66" height="24" rx="2"/>' +
+        '<rect x="98" y="138" width="64" height="34" rx="2"/>' +
+        '<rect x="184" y="138" width="66" height="34" rx="2"/>' +
+        '<rect x="98" y="188" width="64" height="32" rx="2"/>' +
+        '<rect x="184" y="188" width="66" height="32" rx="2"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2.2" fill="none" opacity="0.88">' +
+        '<path d="M88,-10 V250"/>' +
+        '<path d="M174,-10 V250"/>' +
+        '<path d="M-10,180 H268"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,120 H314"/>' +
+        '<path d="M268,-10 V250"/>';
+
+      extraOverlay =
+        '<path d="M-10,64 H324" stroke="' + theme.transitDot + '" stroke-width="3.2" fill="none" opacity="0.85"/>' +
+        '<path d="M-10,64 H324" stroke="' + theme.mapBg + '" stroke-width="1.2" stroke-dasharray="6 6" fill="none"/>';
+
+      transitDots = '<g fill="' + theme.transitDot + '" stroke="' + theme.roadInner + '" stroke-width="1.2">' +
+        '<rect x="169" y="59" width="10" height="10" rx="2"/>' +
+        '<rect x="263" y="59" width="10" height="10" rx="2"/>' +
+      '</g>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="22" y="114" font-size="8.4" fill="' + theme.mapLabel + '">' + esc(pA) + '</text>' +
+        '<text x="275" y="186" font-size="8" fill="' + theme.mapLabel + '" transform="rotate(90 275 186)">' + esc(pB) + '</text>' +
+        '<text x="98" y="57" font-size="7.3" fill="' + theme.transitDot + '">' + esc(pRail) + '</text>' +
+        '<text x="334" y="122" font-size="7.5" letter-spacing="0.8" fill="' + theme.mapLabel + '" opacity="0.78">VỊNH CẢNG</text>' +
+      '</g>';
+
+    } else if (layout === 'aurora_dome') {
+      waterLayer = '<circle cx="122" cy="64" r="14" fill="' + theme.water + '" opacity="0.85"/>' +
+        '<path d="M342,-10 C338,75 344,160 338,250 L415,250 L415,-10 Z" fill="' + theme.water + '" opacity="0.7"/>';
+
+      parkLayer =
+        '<circle cx="122" cy="64" r="36" fill="' + theme.park + '" stroke="' + theme.border + '" stroke-width="1.2" opacity="0.95"/>' +
+        '<circle cx="286" cy="174" r="24" fill="' + theme.park + '" stroke="' + theme.border + '" stroke-width="1" opacity="0.9"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.82">' +
+        '<rect x="24" y="28" width="46" height="24" rx="5"/>' +
+        '<rect x="24" y="64" width="46" height="32" rx="5"/>' +
+        '<rect x="182" y="28" width="52" height="28" rx="5"/>' +
+        '<rect x="248" y="28" width="58" height="28" rx="5"/>' +
+        '<rect x="182" y="72" width="52" height="30" rx="5"/>' +
+        '<rect x="248" y="72" width="58" height="30" rx="5"/>' +
+        '<rect x="34" y="142" width="56" height="28" rx="5"/>' +
+        '<rect x="114" y="142" width="58" height="28" rx="5"/>' +
+        '<rect x="186" y="142" width="54" height="32" rx="5"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2.4" fill="none" opacity="0.95">' +
+        '<path d="M-10,64 Q195,46 340,64"/>' +
+        '<path d="M172,18 V226"/>' +
+        '<path d="M242,18 V226"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,120 H340"/>' +
+        '<path d="M98,-10 V250"/>' +
+        '<path d="M318,-10 V250"/>';
+
+      extraOverlay = '<path d="M-10,198 Q200,224 410,194" fill="none" stroke="' + theme.border + '" stroke-width="1.5" stroke-dasharray="5 4"/>';
+
+      transitDots = '<g fill="' + theme.transitDot + '" stroke="' + theme.roadInner + '" stroke-width="1">' +
+        '<circle cx="98" cy="120" r="3.5"/>' +
+        '<circle cx="318" cy="120" r="3.5"/>' +
+      '</g>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="190" y="114" font-size="8.4" fill="' + theme.mapLabel + '">Đại lộ Cực Quang</text>' +
+        '<text x="94" y="42" font-size="7.6" fill="' + theme.mapLabel + '">Vườn Kính</text>' +
+        '<text x="164" y="216" font-size="7.2" letter-spacing="0.9" fill="' + theme.mapLabel + '" opacity="0.75">VÀNH ĐAI VÒM KÍNH 7.0</text>' +
+      '</g>';
+
+    } else if (layout === 'small_town') {
+      waterLayer = '<ellipse cx="294" cy="64" rx="28" ry="14" fill="' + theme.water + '" opacity="0.88"/>';
+      parkLayer =
+        '<path d="M244,24 L354,28 L362,94 L250,96 Z" fill="' + theme.park + '" opacity="0.88"/>' +
+        '<rect x="18" y="156" width="96" height="58" rx="12" fill="' + theme.park + '" opacity="0.8"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.85">' +
+        '<rect x="34" y="34" width="28" height="18" rx="2"/>' +
+        '<rect x="72" y="34" width="26" height="18" rx="2"/>' +
+        '<rect x="34" y="78" width="32" height="20" rx="2"/>' +
+        '<rect x="148" y="36" width="30" height="20" rx="2"/>' +
+        '<rect x="190" y="36" width="32" height="20" rx="2"/>' +
+        '<rect x="150" y="76" width="36" height="22" rx="2"/>' +
+        '<rect x="148" y="142" width="34" height="22" rx="2"/>' +
+        '<rect x="196" y="146" width="38" height="20" rx="2"/>' +
+        '<rect x="292" y="144" width="34" height="22" rx="2"/>' +
+        '<rect x="292" y="180" width="40" height="20" rx="2"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2.4" fill="none" opacity="0.92" stroke-linecap="round">' +
+        '<path d="M24,64 H232"/>' +
+        '<path d="M126,122 V224"/>' +
+        '<path d="M138,176 H266"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,124 Q130,114 235,120 T415,114"/>' +
+        '<path d="M116,-10 L116,120"/>' +
+        '<path d="M270,118 L272,250"/>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="150" y="113" font-size="8.4" fill="' + theme.mapLabel + '">Đường Trung Tâm</text>' +
+        '<text x="278" y="168" font-size="7.8" fill="' + theme.mapLabel + '">Phố Nam Đồi</text>' +
+        '<text x="266" y="42" font-size="7.4" fill="' + theme.mapLabel + '" opacity="0.8">Công viên Thị trấn</text>' +
+      '</g>';
+
+    } else if (layout === 'border_wild') {
+      waterLayer = '<path d="M-10,204 Q115,192 225,216 T415,204 L415,250 L-10,250 Z" fill="' + theme.water + '" opacity="0.72"/>';
+      parkLayer =
+        '<path d="M-10,-10 H245 Q215,62 150,86 T-10,94 Z" fill="' + theme.park + '" opacity="0.82"/>' +
+        '<path d="M270,122 Q342,102 415,118 V210 H282 Q256,162 270,122 Z" fill="' + theme.park + '" opacity="0.76"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.75">' +
+        '<rect x="172" y="90" width="24" height="14" rx="2"/>' +
+        '<rect x="210" y="138" width="28" height="14" rx="2"/>' +
+        '<rect x="92" y="152" width="22" height="14" rx="2"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2" fill="none" stroke-dasharray="5 4" opacity="0.78">' +
+        '<path d="M254,106 Q278,148 282,226"/>' +
+        '<path d="M128,136 Q118,92 146,42"/>' +
+      '</g>';
+
+      extraOverlay = '<g fill="none" stroke="' + theme.border + '" stroke-width="0.9" opacity="0.4">' +
+        '<path d="M-10,48 Q80,26 168,54 T342,36"/>' +
+        '<path d="M14,186 Q126,164 238,184"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,160 C84,152 142,126 200,120 C264,114 328,88 415,76"/>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="224" y="109" font-size="8.2" fill="' + theme.mapLabel + '" transform="rotate(-11 224 109)">' + esc(curMode === 'geflich' ? 'Đường Vành Đai Rừng' : 'Quốc lộ Biên Giới') + '</text>' +
+        '<text x="28" y="42" font-size="7.4" letter-spacing="0.8" fill="' + theme.mapLabel + '" opacity="0.75">KHU BẢO TỒN</text>' +
+      '</g>';
+
     } else {
-      waterLayer = '<ellipse cx="188" cy="84" rx="22" ry="10" transform="rotate(-14 188 84)" fill="' + theme.water + '" opacity="0.9"/>';
-      parkLayer = '<path d="M128,28 L212,34 L224,96 L154,108 L118,68 Z" fill="' + theme.park + '" opacity="0.92"/>' +
-        '<rect x="282" y="152" width="46" height="34" rx="8" fill="' + theme.park + '" opacity="0.85"/>';
+      /* urban_grid — Clean orthogonal Google-Maps-style city grid (North / Geflich Center) */
+      var gA = curMode === 'geflich'
+        ? (v === 0 ? 'Đại lộ Y Viện' : 'Đ. Học Viện Sinh Thái')
+        : (v === 0 ? 'Đại lộ Liên Bang' : 'Phố Đô Thị Cổ');
+      var gB = curMode === 'geflich'
+        ? (v === 0 ? 'Đ. Khu Trung Tâm' : 'Đ. Bắc Hạ Lưu')
+        : (v === 0 ? 'Đ. Đại Học Bắc' : 'Đ. Trung Tâm Y Sinh');
+      var gZ = (M && M.area) ? M.area.toUpperCase().slice(0, 18) : (curMode === 'geflich' ? 'KHU TRUNG TÂM' : 'LIÊN BANG BẮC');
+
+      var vRoad1 = v === 0 ? 124 : 112;
+      var vRoad2 = v === 0 ? 292 : 276;
+
+      parkLayer = v === 0
+        ? '<rect x="136" y="54" width="66" height="52" rx="6" fill="' + theme.park + '" opacity="0.88"/>' +
+          '<rect x="304" y="134" width="64" height="44" rx="6" fill="' + theme.park + '" opacity="0.78"/>'
+        : '<rect x="24" y="134" width="76" height="46" rx="6" fill="' + theme.park + '" opacity="0.86"/>' +
+          '<rect x="288" y="48" width="72" height="56" rx="6" fill="' + theme.park + '" opacity="0.82"/>';
+
+      blocks = '<g fill="' + theme.block + '" opacity="0.8">' +
+        '<rect x="16" y="12" width="40" height="28" rx="2"/>' +
+        '<rect x="68" y="12" width="42" height="28" rx="2"/>' +
+        '<rect x="138" y="12" width="62" height="28" rx="2"/>' +
+        '<rect x="218" y="12" width="58" height="28" rx="2"/>' +
+        '<rect x="306" y="12" width="64" height="28" rx="2"/>' +
+        '<rect x="16" y="56" width="40" height="48" rx="2"/>' +
+        '<rect x="68" y="56" width="42" height="48" rx="2"/>' +
+        '<rect x="218" y="56" width="58" height="48" rx="2"/>' +
+        '<rect x="138" y="136" width="62" height="40" rx="2"/>' +
+        '<rect x="218" y="136" width="58" height="40" rx="2"/>' +
+        '<rect x="16" y="196" width="92" height="30" rx="2"/>' +
+        '<rect x="138" y="196" width="62" height="30" rx="2"/>' +
+        '<rect x="218" y="196" width="58" height="30" rx="2"/>' +
+        '<rect x="306" y="196" width="64" height="30" rx="2"/>' +
+      '</g>';
+
+      minorRoads = '<g stroke="' + theme.roadMinor + '" stroke-width="2.2" fill="none" opacity="0.88">' +
+        '<path d="M-10,46 H410"/>' +
+        '<path d="M-10,186 H410"/>' +
+        '<path d="M62,-10 V250"/>' +
+        '<path d="M210,-10 V250"/>' +
+        '<path d="M378,-10 V250"/>' +
+      '</g>';
+
+      majorPaths =
+        '<path d="M-10,120 H410"/>' +
+        '<path d="M' + vRoad1 + ',-10 V250"/>' +
+        '<path d="M' + vRoad2 + ',-10 V250"/>';
+
+      transitDots = '<g fill="' + theme.transitDot + '" stroke="' + theme.roadInner + '" stroke-width="1">' +
+        '<rect x="' + (vRoad1 - 3) + '" y="117" width="6" height="6" rx="1.5"/>' +
+        '<rect x="' + (vRoad2 - 3) + '" y="117" width="6" height="6" rx="1.5"/>' +
+      '</g>';
+
+      labels = '<g ' + lblStyle + '>' +
+        '<text x="220" y="114" font-size="8.4" fill="' + theme.mapLabel + '">' + esc(gA) + '</text>' +
+        '<text x="' + (vRoad1 + 7) + '" y="176" font-size="8" fill="' + theme.mapLabel + '" transform="rotate(90 ' + (vRoad1 + 7) + ' 176)">' + esc(gB) + '</text>' +
+        '<text x="298" y="114" font-size="7.2" letter-spacing="0.8" fill="' + theme.mapLabel + '" opacity="0.72">' + esc(gZ) + '</text>' +
+      '</g>';
     }
-
-    var blocks =
-      '<g fill="' + theme.block + '" opacity="0.72">' +
-        '<rect x="14" y="18" width="38" height="22" rx="2"/>' +
-        '<rect x="60" y="16" width="42" height="26" rx="2"/>' +
-        '<rect x="16" y="54" width="34" height="36" rx="2"/>' +
-        '<rect x="64" y="60" width="36" height="28" rx="2"/>' +
-        '<rect x="238" y="22" width="48" height="26" rx="2"/>' +
-        '<rect x="296" y="24" width="36" height="30" rx="2"/>' +
-        '<rect x="242" y="62" width="44" height="32" rx="2"/>' +
-        '<rect x="22" y="112" width="44" height="24" rx="2"/>' +
-        '<rect x="78" y="116" width="38" height="32" rx="2"/>' +
-        '<rect x="132" y="138" width="42" height="28" rx="2"/>' +
-        '<rect x="186" y="142" width="48" height="24" rx="2"/>' +
-        '<rect x="246" y="118" width="42" height="26" rx="2"/>' +
-        '<rect x="34" y="176" width="52" height="24" rx="2"/>' +
-        '<rect x="112" y="186" width="46" height="26" rx="2"/>' +
-        '<rect x="174" y="182" width="50" height="28" rx="2"/>' +
-        '<rect x="244" y="186" width="42" height="26" rx="2"/>' +
-      '</g>';
-
-    var minorRoads =
-      '<g stroke="' + theme.roadMinor + '" stroke-width="2.2" fill="none" opacity="0.85" stroke-linecap="round">' +
-        '<path d="M-10,48 L410,42"/>' +
-        '<path d="M-10,98 L410,112"/>' +
-        '<path d="M-10,164 L410,154"/>' +
-        '<path d="M-10,214 L410,206"/>' +
-        '<path d="M52,-10 L44,250"/>' +
-        '<path d="M108,-10 L118,250"/>' +
-        '<path d="M234,-10 L248,250"/>' +
-        '<path d="M294,-10 L282,250"/>' +
-        '<path d="M352,-10 L344,250"/>' +
-        '<path d="M74,48 L128,176"/>' +
-        '<path d="M262,44 L318,162"/>' +
-      '</g>';
-
-    var majorPaths =
-      '<path d="M-15,196 L192,118 L415,52"/>' +
-      '<path d="M98,-15 L192,118 L278,255"/>' +
-      '<path d="M-15,78 L192,118 L415,172"/>' +
-      '<path d="M252,-15 L218,124 L152,255"/>';
 
     var majorRoads =
       '<g fill="none" stroke-linecap="round" stroke-linejoin="round">' +
-        '<g stroke="' + theme.roadOuter + '" stroke-width="9">' + majorPaths + '</g>' +
-        '<g stroke="' + theme.roadInner + '" stroke-width="6">' + majorPaths + '</g>' +
-        '<circle cx="192" cy="118" r="9" fill="' + theme.roadInner + '" stroke="' + theme.roadOuter + '" stroke-width="2"/>' +
-        '<circle cx="192" cy="118" r="3.5" fill="' + theme.park + '"/>' +
-      '</g>';
-
-    var transitDots =
-      '<g fill="' + theme.transitDot + '" stroke="' + theme.roadInner + '" stroke-width="1">' +
-        '<rect x="66" y="160" width="6" height="6" rx="1.5"/>' +
-        '<rect x="148" y="88" width="6" height="6" rx="1.5"/>' +
-        '<rect x="266" y="92" width="6" height="6" rx="1.5"/>' +
-        '<rect x="218" y="154" width="6" height="6" rx="1.5"/>' +
-        '<rect x="314" y="142" width="6" height="6" rx="1.5"/>' +
-      '</g>';
-
-    var labels =
-      '<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif" font-weight="700" paint-order="stroke" stroke="' + theme.labelHalo + '" stroke-width="3" stroke-linejoin="round">' +
-        '<text x="278" y="92" font-size="8.5" fill="' + theme.mapLabel + '" transform="rotate(-17 278 92)">' + esc(lbls.a) + '</text>' +
-        '<text x="116" y="66" font-size="8.2" fill="' + theme.mapLabel + '" transform="rotate(52 116 66)">' + esc(lbls.b) + '</text>' +
-        '<text x="28" y="102" font-size="8" fill="' + theme.mapLabel + '" transform="rotate(11 28 102)">' + esc(lbls.c) + '</text>' +
-        '<text x="262" y="138" font-size="7.5" letter-spacing="0.8" fill="' + theme.mapLabel + '" opacity="0.72">' + esc(lbls.z) + '</text>' +
+        '<g stroke="' + theme.roadOuter + '" stroke-width="8.5">' + majorPaths + '</g>' +
+        '<g stroke="' + theme.roadInner + '" stroke-width="5.6">' + majorPaths + '</g>' +
       '</g>';
 
     return '<svg class="dp-map-svg" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid slice" aria-hidden="true">' +
       '<rect width="400" height="240" fill="' + theme.mapBg + '"/>' +
-      blocks + parkLayer + waterLayer + minorRoads + majorRoads + transitDots + labels +
+      blocks + parkLayer + waterLayer + minorRoads + majorRoads + extraOverlay + transitDots + labels +
     '</svg>';
   }
 
@@ -233,6 +503,7 @@
     '.dp-app-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:' + T.sub + ';margin-bottom:5px;font-weight:600}',
     '.dp-app-pill{display:inline-flex;align-items:center;gap:5px;text-transform:uppercase;letter-spacing:.4px}',
     '.dp-tag{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 8px;border-radius:999px;background:' + T.accentSoft + ';color:' + T.accent + '}',
+    '.dp-tag.danger{background:rgba(224,93,68,.18);color:#ef5350}',
     '.dp-title{font-size:13.5px;font-weight:700;margin:3px 0 5px}',
     '.dp-line{margin:3px 0;color:' + T.text + '}',
     '.dp-sub{font-size:11.5px;color:' + T.sub + '}',
@@ -246,7 +517,7 @@
     '.dp-cmt{margin-top:6px;padding-left:9px;border-left:2px solid ' + T.border + ';font-size:12px;color:' + T.sub + '}',
     '.dp-cmt.hidden{font-style:italic;opacity:.7}',
     /* Google-Maps-Style Street Map */
-    '.dp-map-search{display:flex;align-items:center;justify-content:space-between;background:' + T.card + ';border:1px solid ' + T.border + ';border-radius:999px;padding:6px 12px;font-size:11.5px;color:' + T.sub + ';margin-bottom:8px;box-shadow:0 2px 6px rgba(0,0,0,.08)}',
+    '.dp-map-search{display:flex;align-items:center;justify-content:space-between;gap:8px;background:' + T.card + ';border:1px solid ' + T.border + ';border-radius:999px;padding:6px 12px;font-size:11.5px;color:' + T.sub + ';margin-bottom:8px;box-shadow:0 2px 6px rgba(0,0,0,.08)}',
     '.dp-map-canvas{position:relative;height:230px;border-radius:14px;border:1px solid ' + T.border + ';background:' + T.mapBg + ';overflow:hidden;margin-bottom:9px}',
     '.dp-map-stage{position:absolute;inset:0;transition:transform .25s ease;transform-origin:50% 50%}',
     '.dp-map-stage.zoomed{transform:scale(1.24)}',
@@ -254,6 +525,9 @@
     '.dp-offlimit{position:absolute;background:repeating-linear-gradient(-45deg,' + T.offBg + ',' + T.offBg + ' 6px,transparent 6px,transparent 12px);border:1.5px dashed ' + T.offStroke + ';display:flex;align-items:center;justify-content:center;text-align:center;padding:6px;z-index:2;backdrop-filter:blur(1.5px)}',
     '.dp-offlimit span{background:' + T.card + ';color:' + T.offStroke + ';font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:6px;border:1px solid ' + T.offStroke + ';max-width:136px;line-height:1.25;box-shadow:0 2px 6px rgba(0,0,0,.15)}',
     '.dp-rim-fog{position:absolute;inset:0;box-shadow:inset 0 0 34px 16px ' + T.bg + ';pointer-events:none;z-index:2}',
+    '.dp-gps-lost-box{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;width:82%;max-width:270px;background:' + T.card + ';border:1.5px dashed ' + T.offStroke + ';border-radius:12px;padding:11px 12px;text-align:center;box-shadow:0 6px 20px rgba(0,0,0,.28)}',
+    '.dp-gps-lost-title{font-size:11.5px;font-weight:800;color:' + T.offStroke + ';letter-spacing:.4px;margin-bottom:4px}',
+    '.dp-gps-lost-sub{font-size:10.5px;color:' + T.sub + ';line-height:1.35}',
     '.dp-me{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;display:flex;flex-direction:column;align-items:center;pointer-events:none}',
     '.dp-me-dot{width:14px;height:14px;border-radius:50%;background:#1a73e8;border:2.5px solid #fff;box-shadow:0 0 0 6px rgba(26,115,232,.26);animation:dpPulse 2s infinite}',
     '.dp-me-lbl{margin-top:3px;font-size:9px;font-weight:700;background:#174ea6;color:#fff;padding:1px 6px;border-radius:999px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.25)}',
@@ -359,7 +633,34 @@
 
   function renderMap() {
     var M = S.map || {};
+    var isGpsLost = detectGpsLost(mode, M);
     var isLocal = M.scope === 'small_town' || mode === 'sim_zone' || mode === 'aurora';
+
+    if (isGpsLost) {
+      var lostLabel = (M.offLimit && M.offLimit.label)
+        ? M.offLimit.label
+        : (mode === 'switching'
+            ? 'Mất kết nối mạng nội bộ • Đang dò tín hiệu vệ tinh...'
+            : 'Khu vực hạn chế / Vùng nhiễu GPS • Không có dữ liệu tuyến đường');
+      var lostNote = M.note || 'Thiết bị không thể xác định tọa độ hiện tại trong khu vực này.';
+
+      return '<div class="dp-map-search"><span>🔍 ' + esc(M.area || 'Không có dữ liệu khu vực') + '</span><span class="dp-tag danger">MẤT ĐỊNH VỊ</span></div>' +
+        '<div class="dp-map-canvas">' +
+          '<div class="dp-map-stage">' +
+            buildLostSignalSvg(T) +
+            '<div class="dp-rim-fog"></div>' +
+            '<div class="dp-gps-lost-box">' +
+              '<div class="dp-gps-lost-title">📡 KHÔNG THỂ ĐỊNH VỊ GPS</div>' +
+              '<div class="dp-gps-lost-sub">' + esc(lostLabel) + '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="dp-card" style="padding:8px 10px;border-left:3px solid ' + T.offStroke + '">' +
+          '<div class="dp-line"><b>⛔ Vị trí hiện tại: Không xác định</b></div>' +
+          '<div class="dp-sub">' + esc(lostNote) + '</div>' +
+        '</div>';
+    }
+
     var mapBadge = mode === 'aurora' ? 'NỘI BỘ 7.0'
       : (isLocal ? 'CỤC BỘ' : (mode === 'buffer' ? 'SÓNG YẾU' : 'GPS TRỰC TIẾP'));
     var defaults = [[22, 26], [76, 72], [24, 74], [76, 26], [50, 18]];
@@ -413,7 +714,7 @@
     return '<div class="dp-map-search"><span>🔍 ' + esc(M.area || 'Bản đồ khu vực') + '</span><span class="dp-tag">' + mapBadge + '</span></div>' +
       '<div class="dp-map-canvas">' +
         '<div class="dp-map-stage' + (mapZoomed ? ' zoomed' : '') + '">' +
-          buildStreetMapSvg(mode, T) +
+          buildStreetMapSvg(mode, T, M) +
           offHtml +
           pinsHtml +
           '<div class="dp-me"><div class="dp-me-dot"></div><div class="dp-me-lbl">Bạn đang ở đây</div></div>' +
